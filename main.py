@@ -5,8 +5,6 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 
-# theme colors - spent way too long on these lol
-# violet night is the best one dont @ me
 THEMES = {
     "Violet Night": {
         "bg":"#0a0812","panel":"#0f0d1a","panel2":"#161228","panel3":"#1c1735",
@@ -45,8 +43,54 @@ THEMES = {
     },
 }
 
-# global color dict, gets swapped out when user picks a new theme
 C = dict(THEMES["Violet Night"])
+
+
+class StatsWorker(QObject):
+    """runs in a background thread so the UI doesnt freeze while polling cpu/disk etc"""
+    stats_ready = pyqtSignal(dict)
+
+    def __init__(self):
+        super().__init__()
+        # first call always returns 0.0 so we throw it away
+        psutil.cpu_percent(interval=None)
+        psutil.cpu_percent(percpu=True, interval=None)
+
+    @pyqtSlot()
+    def poll(self):
+        cpu_total = psutil.cpu_percent(interval=None)
+        cpu_cores = psutil.cpu_percent(percpu=True, interval=None)
+        ram  = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+
+        # temp reading is super flaky on VMs/some hardware, just skip if it errors
+        cpu_temp = None
+        try:
+            temps = psutil.sensors_temperatures()
+            for key in ("coretemp", "cpu_thermal", "k10temp", "acpitz"):
+                if key in temps and temps[key]:
+                    cpu_temp = temps[key][0].current
+                    break
+        except Exception:
+            pass
+
+        battery = "N/A"
+        try:
+            bat = psutil.sensors_battery()
+            if bat:
+                plug = "⚡" if bat.power_plugged else ""
+                battery = f"{bat.percent:.0f}%{plug}"
+        except Exception:
+            pass
+
+        self.stats_ready.emit({
+            "cpu": cpu_total, "cpu_cores": cpu_cores,
+            "ram_pct": ram.percent, "ram_used_gb": ram.used / 1e9,
+            "disk_pct": disk.percent,
+            "temp": cpu_temp, "battery": battery,
+            "proc_count": len(psutil.pids()),
+            "uptime_s": int(datetime.now().timestamp() - psutil.boot_time()),
+        })
 
 
 class AniHighTaskManager(QMainWindow):
@@ -56,6 +100,7 @@ class AniHighTaskManager(QMainWindow):
         self.resize(1300, 800)
         self.setMinimumSize(960, 640)
         self.theme_name = "Violet Night"
+        self.last_stats = {}
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -63,7 +108,6 @@ class AniHighTaskManager(QMainWindow):
         main.setContentsMargins(12, 8, 12, 10)
         main.setSpacing(7)
 
-        # header
         hdr = QHBoxLayout()
         title = QLabel("✦ ANIME TASK MANAGER ✦")
         title.setObjectName("title")
@@ -89,16 +133,42 @@ class AniHighTaskManager(QMainWindow):
         hdr.addWidget(os_lbl)
         main.addLayout(hdr)
 
-        placeholder = QLabel("more stuff coming soon...")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main.addWidget(placeholder)
+        # debug label just to confirm stats are coming in
+        self.debug_lbl = QLabel("waiting for stats...")
+        self.debug_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(self.debug_lbl)
 
         self._apply_styles()
+        self._start_workers()
 
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._tick_clock)
         self._clock_timer.start(1000)
         self._tick_clock()
+
+    def _start_workers(self):
+        self._thread = QThread(self)
+        self._worker = StatsWorker()
+        self._worker.moveToThread(self._thread)
+        self._worker.stats_ready.connect(self._on_stats)
+        self._thread.start()
+
+        self._stats_timer = QTimer()
+        self._stats_timer.setInterval(1500)
+        self._stats_timer.timeout.connect(self._worker.poll)
+        self._stats_timer.moveToThread(self._thread)
+        QMetaObject.invokeMethod(self._stats_timer, "start",
+                                 Qt.ConnectionType.QueuedConnection)
+
+        QTimer.singleShot(300, self._worker.poll)
+
+    @pyqtSlot(dict)
+    def _on_stats(self, s):
+        self.last_stats = s
+        self.debug_lbl.setText(
+            f"CPU: {s['cpu']:.1f}%  RAM: {s['ram_pct']:.1f}%  "
+            f"DISK: {s['disk_pct']:.1f}%  procs: {s['proc_count']}"
+        )
 
     def _tick_clock(self):
         self.clock_lbl.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
@@ -138,6 +208,12 @@ class AniHighTaskManager(QMainWindow):
             color:{C['text']}; selection-background-color:{C['glow']}55;
         }}
         """)
+
+    def closeEvent(self, e):
+        self._stats_timer.stop()
+        self._thread.quit()
+        self._thread.wait(2000)
+        super().closeEvent(e)
 
 
 if __name__ == "__main__":
