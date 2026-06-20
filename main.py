@@ -1,4 +1,4 @@
-import sys, os, platform
+import sys, os, platform, csv
 import psutil
 from datetime import datetime
 from PyQt6.QtWidgets import *
@@ -49,9 +49,24 @@ C = dict(THEMES["Violet Night"])
 class StatsWorker(QObject):
     """runs in a background thread so the UI doesnt freeze while polling cpu/disk etc"""
     stats_ready = pyqtSignal(dict)
+    procs_ready = pyqtSignal(list)
 
     def __init__(self):
         super().__init__()
+        # need baseline network numbers for delta calculation
+        net = psutil.net_io_counters()
+        self._prev_sent = net.bytes_sent
+        self._prev_recv = net.bytes_recv
+        self._peak_sent = 1.0
+        self._peak_recv = 1.0
+
+        # same idea for disk io
+        disk = psutil.disk_io_counters()
+        self._prev_dread  = disk.read_bytes  if disk else 0
+        self._prev_dwrite = disk.write_bytes if disk else 0
+        self._peak_dread  = 1.0
+        self._peak_dwrite = 1.0
+
         # first call always returns 0.0 so we throw it away
         psutil.cpu_percent(interval=None)
         psutil.cpu_percent(percpu=True, interval=None)
@@ -62,6 +77,30 @@ class StatsWorker(QObject):
         cpu_cores = psutil.cpu_percent(percpu=True, interval=None)
         ram  = psutil.virtual_memory()
         disk = psutil.disk_usage("/")
+
+        net = psutil.net_io_counters()
+        sent_kb = (net.bytes_sent - self._prev_sent) / 1024.0
+        recv_kb = (net.bytes_recv - self._prev_recv) / 1024.0
+        self._prev_sent = net.bytes_sent
+        self._prev_recv = net.bytes_recv
+        self._peak_sent = max(self._peak_sent, sent_kb, 1.0)
+        self._peak_recv = max(self._peak_recv, recv_kb, 1.0)
+        sent_pct = min(100.0, sent_kb / self._peak_sent * 100.0)
+        recv_pct = min(100.0, recv_kb / self._peak_recv * 100.0)
+
+        dsk = psutil.disk_io_counters()
+        if dsk:
+            dr_kb = (dsk.read_bytes  - self._prev_dread)  / 1024.0
+            dw_kb = (dsk.write_bytes - self._prev_dwrite) / 1024.0
+            self._prev_dread  = dsk.read_bytes
+            self._prev_dwrite = dsk.write_bytes
+        else:
+            dr_kb = dw_kb = 0.0
+
+        self._peak_dread  = max(self._peak_dread,  dr_kb, 1.0)
+        self._peak_dwrite = max(self._peak_dwrite, dw_kb, 1.0)
+        dr_pct = min(100.0, dr_kb / self._peak_dread  * 100.0)
+        dw_pct = min(100.0, dw_kb / self._peak_dwrite * 100.0)
 
         # temp reading is super flaky on VMs/some hardware, just skip if it errors
         cpu_temp = None
@@ -87,13 +126,53 @@ class StatsWorker(QObject):
             "cpu": cpu_total, "cpu_cores": cpu_cores,
             "ram_pct": ram.percent, "ram_used_gb": ram.used / 1e9,
             "disk_pct": disk.percent,
+            "sent_pct": sent_pct, "recv_pct": recv_pct,
+            "sent_kb": sent_kb,   "recv_kb": recv_kb,
+            "dr_pct": dr_pct, "dw_pct": dw_pct,
+            "dr_kb": dr_kb,   "dw_kb": dw_kb,
             "temp": cpu_temp, "battery": battery,
             "proc_count": len(psutil.pids()),
             "uptime_s": int(datetime.now().timestamp() - psutil.boot_time()),
         })
 
+    @pyqtSlot(str, int, bool)
+    def get_procs(self, query: str, sort_idx: int, hide_sys: bool):
+        procs = []
+
+        # these are noisy kernel/OS processes that most people dont care about
+        sys_names = {
+            "svchost.exe", "system idle process", "system", "registry",
+            "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+            "kthreadd", "ksoftirqd/0", "kworker/0:0"
+        }
+
+        for p in psutil.process_iter(["pid", "name", "memory_percent",
+                                       "cpu_percent", "status", "create_time"]):
+            try:
+                info = p.info
+                nm = str(info["name"]).lower()
+                if hide_sys and nm in sys_names:
+                    continue
+                if query and query not in nm:
+                    continue
+                procs.append(info)
+            except Exception:
+                pass  # access denied on some system procs, just skip em
+
+        sorters = [
+            lambda x: x.get("memory_percent") or 0.0,
+            lambda x: x.get("cpu_percent")     or 0.0,
+            lambda x: (x.get("name") or "").lower(),
+            lambda x: x.get("pid")             or 0,
+        ]
+        reverse = sort_idx in (0, 1)
+        procs.sort(key=sorters[sort_idx], reverse=reverse)
+        self.procs_ready.emit(procs)
+
 
 class AniHighTaskManager(QMainWindow):
+    _request_procs = pyqtSignal(str, int, bool)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("✦ AniHigh Task Manager ✦")
@@ -101,6 +180,7 @@ class AniHighTaskManager(QMainWindow):
         self.setMinimumSize(960, 640)
         self.theme_name = "Violet Night"
         self.last_stats = {}
+        self._proc_busy = False
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -133,7 +213,6 @@ class AniHighTaskManager(QMainWindow):
         hdr.addWidget(os_lbl)
         main.addLayout(hdr)
 
-        # debug label just to confirm stats are coming in
         self.debug_lbl = QLabel("waiting for stats...")
         self.debug_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main.addWidget(self.debug_lbl)
@@ -150,7 +229,10 @@ class AniHighTaskManager(QMainWindow):
         self._thread = QThread(self)
         self._worker = StatsWorker()
         self._worker.moveToThread(self._thread)
+
         self._worker.stats_ready.connect(self._on_stats)
+        self._worker.procs_ready.connect(self._on_procs)
+        self._request_procs.connect(self._worker.get_procs)
         self._thread.start()
 
         self._stats_timer = QTimer()
@@ -160,15 +242,33 @@ class AniHighTaskManager(QMainWindow):
         QMetaObject.invokeMethod(self._stats_timer, "start",
                                  Qt.ConnectionType.QueuedConnection)
 
+        self._proc_timer = QTimer(self)
+        self._proc_timer.setInterval(5000)
+        self._proc_timer.timeout.connect(self._refresh_procs)
+        self._proc_timer.start()
+
         QTimer.singleShot(300, self._worker.poll)
+        QTimer.singleShot(400, self._refresh_procs)
+
+    def _refresh_procs(self):
+        if self._proc_busy:
+            return
+        self._proc_busy = True
+        self._request_procs.emit("", 0, True)
 
     @pyqtSlot(dict)
     def _on_stats(self, s):
         self.last_stats = s
         self.debug_lbl.setText(
             f"CPU: {s['cpu']:.1f}%  RAM: {s['ram_pct']:.1f}%  "
-            f"DISK: {s['disk_pct']:.1f}%  procs: {s['proc_count']}"
+            f"NET tx:{s['sent_kb']:.1f}kb rx:{s['recv_kb']:.1f}kb  "
+            f"DISK r:{s['dr_kb']:.1f}kb w:{s['dw_kb']:.1f}kb"
         )
+
+    @pyqtSlot(list)
+    def _on_procs(self, procs):
+        self._proc_busy = False
+        # procs arriving fine, will wire up table next
 
     def _tick_clock(self):
         self.clock_lbl.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
