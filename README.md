@@ -14,7 +14,32 @@ A new gen Task Manager for all my fellow weebs out there Anihigh is planned to b
 9. Export process snapshots to CSV with timestamps
 10. Five built-in color themes
 
+## Contributions are always welcome!
 
+Whether it's fixing a bug, improving performance, adding a new feature, or polishing the UI, every contribution helps make AniHigh Task Manager even better.
+
+## Contribution Guidelines
+
+- Keep the code clean and readable.
+- Follow the existing project structure and naming conventions.
+- Test your changes before submitting.
+- Keep pull requests focused on a single feature or fix.
+- If you're planning a major feature or architectural change, open an issue first so we can discuss it.
+
+## Bug Reports
+
+If you find a bug, please open an issue and include:
+- Windows version
+- Python version (if running raw)
+- Steps to reproduce
+- Screenshots or logs (if applicable)
+
+## Feature Requests
+
+Have an idea? Open an issue explaining:
+- What the feature does
+- Why it would be useful
+- Any references? (optional)
 
 
 
