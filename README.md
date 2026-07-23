@@ -1,16 +1,17 @@
 # Anihigh-Task-Manager
 A new gen Task Manager for all my fellow weebs out there Anihigh is planned to be lightweight,performance based and visually exciting and aimed to be better than windows task manager
-Current Features:
-1)Per core monitoring
-2)Includes Aesthetic Graphs
-3)Features System-Chan
-4)CPU temperature and battery status
-5)Suspend / Resume processes (not just kill), useful for throttling something without losing its state
-6)Pinned Watchlist: pin any process and get notified if it unexpectedly terminates — handy for tracking a specific app/service
-7)Search/filter and multi-mode sort (by memory, CPU, name, or PID)
-8)One-click "Hide OS Procs" toggle to filter out kernel/system noise
-9)CSV export of the current process snapshot with timestamp
-10)5 Color themes
+##Current Features:
+
+1. Per-core CPU monitoring
+2. Aesthetic real-time graphs
+3. System-chan assistant
+4. CPU temperature and battery status
+5. Suspend/Resume processes without losing their state
+6. Pinned watchlist with notifications when tracked processes unexpectedly terminate
+7. Search/filter and sorting by CPU, memory, name, or PID
+8. One-click "Hide OS Processes" toggle to reduce system clutter
+9. Export process snapshots to CSV with timestamps
+10. Five built-in color themes
 
 
 
